@@ -15,17 +15,85 @@ use rust_xlsxwriter::Workbook;
 use arrow_array::{StringArray, Array};
 use arrow_schema::{Field, Schema, DataType};
 
+use rayon::prelude::*;
+use memmap2::Mmap;
+
 pub fn read_csv(path: &str) -> Result<DataFrame> {
-    let schema = infer_schema_from_files(&[path.to_string()], b',', None, true)
+    // Faster schema inference by limiting to 1000 records
+    let schema = infer_schema_from_files(&[path.to_string()], b',', Some(1000), true)
         .with_context(|| format!("Failed to infer schema for CSV file: {}", path))?;
+    let schema_arc = Arc::new(schema);
+
     let file = File::open(path).with_context(|| format!("Failed to open CSV file: {}", path))?;
-    let reader = BufReader::new(file);
-    let csv_reader = ReaderBuilder::new(Arc::new(schema))
-        .with_header(true)
-        .build(reader)?;
-    let batches = csv_reader
-        .collect::<std::result::Result<Vec<RecordBatch>, _>>()
-        .context("Failed to read CSV batches")?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let bytes = &mmap[..];
+
+    // Determine parallel segments
+    let n_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    
+    if n_threads <= 1 || bytes.len() < 1024 * 1024 {
+        // Fallback for single thread or small files
+        let csv_reader = ReaderBuilder::new(schema_arc)
+            .with_header(true)
+            .build(bytes)?;
+        let batches = csv_reader
+            .collect::<std::result::Result<Vec<RecordBatch>, _>>()
+            .context("Failed to read CSV batches")?;
+        return Ok(DataFrame { batches });
+    }
+
+    let chunk_size = bytes.len() / n_threads;
+    let mut offsets = Vec::with_capacity(n_threads + 1);
+    offsets.push(0);
+
+    for i in 1..n_threads {
+        let mut pos = i * chunk_size;
+        // Find the next newline to ensure we don't split in the middle of a record
+        while pos < bytes.len() && bytes[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < bytes.len() {
+            offsets.push(pos + 1);
+        }
+    }
+    offsets.push(bytes.len());
+
+    // Process chunks in parallel
+    let results: Result<Vec<Vec<RecordBatch>>> = offsets
+        .windows(2)
+        .enumerate()
+        .par_bridge()
+        .map(|(id, window)| {
+            let start = window[0];
+            let end = window[1];
+            if start >= end {
+                return Ok(vec![]);
+            }
+
+            let chunk_bytes = &bytes[start..end];
+            let mut builder = ReaderBuilder::new(schema_arc.clone());
+            
+            // Only the first chunk should treat the first line as a header
+            if id == 0 {
+                builder = builder.with_header(true);
+            } else {
+                builder = builder.with_header(false);
+            }
+
+            let csv_reader = builder.build(chunk_bytes)?;
+            let chunk_batches = csv_reader
+                .collect::<std::result::Result<Vec<RecordBatch>, _>>()?;
+            Ok(chunk_batches)
+        })
+        .collect();
+
+    let batches = results?
+        .into_iter()
+        .flatten()
+        .collect();
+
     Ok(DataFrame { batches })
 }
 
