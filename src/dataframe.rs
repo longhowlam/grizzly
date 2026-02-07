@@ -185,7 +185,8 @@ impl DataFrame {
 
     #[pyo3(signature = (other, on, how=None))]
     pub fn join(&self, other: &DataFrame, on: &str, how: Option<&str>) -> PyResult<DataFrame> {
-        if self.batches.is_empty() || other.batches.is_empty() { return Ok(self.clone()); }
+        if self.batches.is_empty() { return Ok(self.clone()); }
+        if other.batches.is_empty() { return Ok(self.clone()); }
         
         let schema_l = self.batches[0].schema();
         let batch_l = concat_batches(&schema_l, &self.batches).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
@@ -209,18 +210,28 @@ impl DataFrame {
             }
         }
         
-        let mut indices_l: Vec<u64> = Vec::new();
-        let mut indices_r: Vec<u64> = Vec::new();
+        let mut indices_l: Vec<Option<u64>> = Vec::new();
+        let mut indices_r: Vec<Option<u64>> = Vec::new();
         
+        let how_str = how.unwrap_or("inner");
+        let is_left = how_str == "left";
+
         for i in 0..batch_l.num_rows() {
+            let mut found = false;
             if !arr_l_str.is_null(i) {
                 let key = arr_l_str.value(i);
                 if let Some(r_idxs) = map_r.get(key) {
+                    found = true;
                     for &r_idx in r_idxs {
-                        indices_l.push(i as u64);
-                        indices_r.push(r_idx as u64);
+                        indices_l.push(Some(i as u64));
+                        indices_r.push(Some(r_idx as u64));
                     }
                 }
+            }
+            
+            if !found && is_left {
+                indices_l.push(Some(i as u64));
+                indices_r.push(None);
             }
         }
         
@@ -241,7 +252,7 @@ impl DataFrame {
             let col = take(batch_r.column(i), &idx_r_arr, None).unwrap();
             joined_columns.push(col);
             let mut field = schema_r.field(i).clone();
-            field = Field::new(format!("{}_right", field.name()), field.data_type().clone(), field.is_nullable());
+            field = Field::new(format!("{}_right", field.name()), field.data_type().clone(), true); // Left join makes right columns nullable
             joined_fields.push(field);
         }
         
