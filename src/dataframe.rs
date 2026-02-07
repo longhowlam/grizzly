@@ -251,8 +251,49 @@ impl DataFrame {
         Ok(DataFrame { batches: vec![joined_batch] })
     }
 
-    pub fn show(&self) -> PyResult<()> {
-        arrow::util::pretty::print_batches(&self.batches)
+    #[pyo3(signature = (n=None))]
+    pub fn show(&self, n: Option<usize>) -> PyResult<()> {
+        let n_val = n.unwrap_or(10);
+        let df_head = self.head(Some(n_val));
+        
+        if df_head.batches.is_empty() {
+            return Ok(());
+        }
+
+        let original_schema = df_head.batches[0].schema();
+        
+        // Create a display schema where all columns are Utf8
+        let mut display_fields = Vec::new();
+        for field in original_schema.fields() {
+            display_fields.push(Field::new(field.name(), DataType::Utf8, true));
+        }
+        let display_schema = Arc::new(Schema::new(display_fields));
+
+        let mut display_columns: Vec<Arc<dyn Array>> = Vec::new();
+        for i in 0..original_schema.fields().len() {
+            let field = original_schema.field(i);
+            let mut col_data = vec![Some(format!("{}", field.data_type()))];
+            
+            // Collect data from head batches
+            for batch in &df_head.batches {
+                let col = batch.column(i);
+                let string_col = cast(col, &DataType::Utf8).unwrap();
+                let string_array = string_col.as_any().downcast_ref::<StringArray>().unwrap();
+                for j in 0..string_array.len() {
+                    if string_array.is_null(j) {
+                        col_data.push(None);
+                    } else {
+                        col_data.push(Some(string_array.value(j).to_string()));
+                    }
+                }
+            }
+            display_columns.push(Arc::new(StringArray::from(col_data)));
+        }
+
+        let display_batch = RecordBatch::try_new(display_schema, display_columns)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+
+        arrow::util::pretty::print_batches(&vec![display_batch])
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 }
