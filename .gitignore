@@ -71,3 +71,4 @@ docs/_build/
 # Pyenv
 .python-version
 perf_test.csv
+summary.parquet

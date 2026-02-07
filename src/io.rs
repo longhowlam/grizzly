@@ -17,16 +17,15 @@ use arrow_schema::{Field, Schema, DataType};
 
 use rayon::prelude::*;
 use memmap2::Mmap;
-
 pub fn read_csv(path: &str) -> Result<DataFrame> {
+    let file = File::open(path).with_context(|| format!("Failed to open CSV file: {}", path))?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let bytes = &mmap[..];
+
     // Faster schema inference by limiting to 1000 records
     let schema = infer_schema_from_files(&[path.to_string()], b',', Some(1000), true)
         .with_context(|| format!("Failed to infer schema for CSV file: {}", path))?;
     let schema_arc = Arc::new(schema);
-
-    let file = File::open(path).with_context(|| format!("Failed to open CSV file: {}", path))?;
-    let mmap = unsafe { Mmap::map(&file)? };
-    let bytes = &mmap[..];
 
     // Determine parallel segments
     let n_threads = std::thread::available_parallelism()
@@ -45,26 +44,52 @@ pub fn read_csv(path: &str) -> Result<DataFrame> {
     }
 
     let chunk_size = bytes.len() / n_threads;
-    let mut offsets = Vec::with_capacity(n_threads + 1);
+    let mut offsets = Vec::new();
     offsets.push(0);
 
+    let mut in_quotes = false;
+    let mut last_pos = 0;
+    
+    // Scan for boundaries
     for i in 1..n_threads {
-        let mut pos = i * chunk_size;
-        // Find the next newline to ensure we don't split in the middle of a record
-        while pos < bytes.len() && bytes[pos] != b'\n' {
+        let target = i * chunk_size;
+        let mut pos = target;
+        
+        // We need to know the state (in_quotes) at the start of the chunk.
+        // The most robust way is to scan from the last known boundary.
+        let mut current_in_quotes = in_quotes;
+        for j in last_pos..pos {
+            if bytes[j] == b'"' {
+                current_in_quotes = !current_in_quotes;
+            }
+        }
+        in_quotes = current_in_quotes;
+        
+        // Now find the next newline that is NOT inside quotes
+        while pos < bytes.len() {
+            if bytes[pos] == b'"' {
+                in_quotes = !in_quotes;
+            } else if bytes[pos] == b'\n' && !in_quotes {
+                pos += 1;
+                break;
+            }
             pos += 1;
         }
+        
         if pos < bytes.len() {
-            offsets.push(pos + 1);
+            offsets.push(pos);
+            last_pos = pos;
         }
     }
     offsets.push(bytes.len());
+    offsets.dedup();
 
     // Process chunks in parallel
     let results: Result<Vec<Vec<RecordBatch>>> = offsets
         .windows(2)
         .enumerate()
-        .par_bridge()
+        .collect::<Vec<_>>()
+        .into_par_iter()
         .map(|(id, window)| {
             let start = window[0];
             let end = window[1];
@@ -73,7 +98,8 @@ pub fn read_csv(path: &str) -> Result<DataFrame> {
             }
 
             let chunk_bytes = &bytes[start..end];
-            let mut builder = ReaderBuilder::new(schema_arc.clone());
+            let mut builder = ReaderBuilder::new(schema_arc.clone())
+                .with_batch_size(65536);
             
             // Only the first chunk should treat the first line as a header
             if id == 0 {
@@ -83,8 +109,9 @@ pub fn read_csv(path: &str) -> Result<DataFrame> {
             }
 
             let csv_reader = builder.build(chunk_bytes)?;
-            let chunk_batches = csv_reader
+            let chunk_batches: Vec<RecordBatch> = csv_reader
                 .collect::<std::result::Result<Vec<RecordBatch>, _>>()?;
+            
             Ok(chunk_batches)
         })
         .collect();
