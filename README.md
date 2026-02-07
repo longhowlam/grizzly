@@ -30,8 +30,10 @@ Grizzly is a high-performance Python data manipulation library built from scratc
 
 - `row_count() -> int`: Returns the number of rows in the DataFrame.
 - `column_count() -> int`: Returns the number of columns.
+- `shape -> tuple[int, int]`: Returns the shape of the DataFrame as (rows, columns).
 - `head(n: int = 5) -> DataFrame`: Returns a new DataFrame with the first `n` rows.
 - `show(n: int = 10)`: Prints the first `n` rows of the DataFrame in a pretty table, including column data types.
+- `query(sql: str) -> DataFrame`: Executes a SQL query on the DataFrame and returns the result.
 - `filter_eq(col_name: str, value: str) -> DataFrame`: Filters rows where the specified column equals the given value.
 - `sort(col_name: str, ascending: bool = True) -> DataFrame`: Sorts the DataFrame by the specified column.
 - `concat(other: DataFrame) -> DataFrame`: Concatenates two DataFrames.

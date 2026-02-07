@@ -35,6 +35,11 @@ impl DataFrame {
         format!("<grizzly.DataFrame ({} rows, {} columns)>", self.row_count(), self.column_count())
     }
 
+    #[getter]
+    pub fn shape(&self) -> (usize, usize) {
+        (self.row_count(), self.column_count())
+    }
+
     #[allow(non_snake_case)]
     #[pyo3(signature = (n=None))]
     pub fn head(&self, n: Option<usize>) -> DataFrame {
@@ -88,6 +93,74 @@ impl DataFrame {
             
             let mask: BooleanArray = BooleanArray::from_unary(string_array, |s| s == value);
             
+            let filtered_batch = filter_record_batch(batch, &mask)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+            
+            if filtered_batch.num_rows() > 0 {
+                filtered_batches.push(filtered_batch);
+            }
+        }
+
+        Ok(DataFrame { batches: filtered_batches })
+    }
+
+    pub fn query(&self, expression: &str) -> PyResult<DataFrame> {
+        let parts: Vec<&str> = expression.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Query expression must be in format 'column operator value'"
+            ));
+        }
+
+        let col_name = parts[0];
+        let op = parts[1];
+        let val_str = parts[2];
+
+        let mut filtered_batches = Vec::new();
+
+        for batch in &self.batches {
+            let col_idx = batch.schema().index_of(col_name)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", e)))?;
+            
+            let col = batch.column(col_idx);
+            let mask = match col.data_type() {
+                DataType::Int64 => {
+                    let arr = col.as_any().downcast_ref::<arrow_array::Int64Array>().unwrap();
+                    let val = val_str.parse::<i64>().map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid integer value"))?;
+                    match op {
+                        "<" => Ok(BooleanArray::from_unary(arr, |v| v < val)),
+                        ">" => Ok(BooleanArray::from_unary(arr, |v| v > val)),
+                        "<=" => Ok(BooleanArray::from_unary(arr, |v| v <= val)),
+                        ">=" => Ok(BooleanArray::from_unary(arr, |v| v >= val)),
+                        "==" => Ok(BooleanArray::from_unary(arr, |v| v == val)),
+                        "!=" => Ok(BooleanArray::from_unary(arr, |v| v != val)),
+                        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Unsupported operator: {}", op))),
+                    }
+                },
+                DataType::Float64 => {
+                    let arr = col.as_any().downcast_ref::<arrow_array::Float64Array>().unwrap();
+                    let val = val_str.parse::<f64>().map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid float value"))?;
+                    match op {
+                        "<" => Ok(BooleanArray::from_unary(arr, |v| v < val)),
+                        ">" => Ok(BooleanArray::from_unary(arr, |v| v > val)),
+                        "<=" => Ok(BooleanArray::from_unary(arr, |v| v <= val)),
+                        ">=" => Ok(BooleanArray::from_unary(arr, |v| v >= val)),
+                        "==" => Ok(BooleanArray::from_unary(arr, |v| v == val)),
+                        "!=" => Ok(BooleanArray::from_unary(arr, |v| v != val)),
+                        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Unsupported operator: {}", op))),
+                    }
+                },
+                DataType::Utf8 => {
+                    let arr = col.as_any().downcast_ref::<arrow_array::StringArray>().unwrap();
+                    match op {
+                        "==" => Ok(BooleanArray::from_unary(arr, |v| v == val_str)),
+                        "!=" => Ok(BooleanArray::from_unary(arr, |v| v != val_str)),
+                        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Unsupported operator for string: {}", op))),
+                    }
+                },
+                _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Unsupported column type: {:?}", col.data_type()))),
+            }?;
+
             let filtered_batch = filter_record_batch(batch, &mask)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
             
