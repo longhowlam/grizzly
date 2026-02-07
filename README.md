@@ -17,6 +17,31 @@ Grizzly is a high-performance Python data manipulation library built from scratc
     -   High-performance **Joins** (Inner joins on keys).
     -   Data aggregation with **Groupby** (`groupby_sum`).
 
+## 📖 API Reference
+
+### Module-level Functions
+
+- `read_csv(path: str) -> DataFrame`: Reads a CSV file into a DataFrame.
+- `read_parquet(path: str) -> DataFrame`: Reads a Parquet file into a DataFrame.
+- `read_json(path: str) -> DataFrame`: Reads a line-delimited JSON file into a DataFrame.
+- `read_excel(path: str) -> DataFrame`: Reads an Excel file (.xlsx) into a DataFrame.
+
+### DataFrame Methods
+
+- `row_count() -> int`: Returns the number of rows in the DataFrame.
+- `column_count() -> int`: Returns the number of columns.
+- `head(n: int = 5) -> DataFrame`: Returns a new DataFrame with the first `n` rows.
+- `show(n: int = 10)`: Prints the first `n` rows of the DataFrame in a pretty table, including column data types.
+- `filter_eq(col_name: str, value: str) -> DataFrame`: Filters rows where the specified column equals the given value.
+- `sort(col_name: str, ascending: bool = True) -> DataFrame`: Sorts the DataFrame by the specified column.
+- `concat(other: DataFrame) -> DataFrame`: Concatenates two DataFrames.
+- `groupby_sum(group_col: str, agg_col: str) -> DataFrame`: Groups by `group_col` and sums the `agg_col`.
+- `join(other: DataFrame, on: str, how: str = "inner") -> DataFrame`: Joins with another DataFrame on a common column. Supports `how="inner"` and `how="left"`.
+- `to_csv(path: str)`: Exports the DataFrame to a CSV file.
+- `to_parquet(path: str)`: Exports the DataFrame to a Parquet file.
+- `to_json(path: str)`: Exports the DataFrame to a JSON file.
+- `to_excel(path: str)`: Exports the DataFrame to an Excel file.
+
 ## 🛠 Installation
 
 You can build and install grizzly locally using `maturin`:
