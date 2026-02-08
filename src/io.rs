@@ -14,6 +14,8 @@ use calamine::{Reader, Xlsx, open_workbook};
 use rust_xlsxwriter::Workbook;
 use arrow_array::{StringArray, Array};
 use arrow_schema::{Field, Schema, DataType};
+use sas7bdat::{SasReader, CellValue};
+use arrow_array::{Float64Array, TimestampMillisecondArray};
 
 use rayon::prelude::*;
 use memmap2::Mmap;
@@ -244,3 +246,119 @@ pub fn to_excel(df: &DataFrame, path: &str) -> Result<()> {
     workbook.save(path)?;
     Ok(())
 }
+
+pub fn read_sas(path: &str) -> Result<DataFrame> {
+    let file = File::open(path).with_context(|| format!("Failed to open SAS file: {}", path))?;
+    let mut reader = SasReader::from_reader(file)
+        .with_context(|| format!("Failed to parse SAS file: {}", path))?;
+    
+    // Collect all rows first
+    let mut rows_iter = reader.rows_named()?;
+    let mut all_rows: Vec<_> = Vec::new();
+    
+    while let Some(row_result) = rows_iter.next() {
+        let row = row_result?;
+        all_rows.push(row);
+    }
+    
+    if all_rows.is_empty() {
+        return Err(anyhow::anyhow!("SAS file is empty"));
+    }
+    
+    // Get column count from first row's actual values
+    let first_row = &all_rows[0];
+    let first_values = first_row.values();
+    let column_count = first_values.len();
+    
+    // Generate column names
+    let mut column_names = Vec::new();
+    for i in 0..column_count {
+        column_names.push(format!("col_{}", i));
+    }
+    
+    // Infer schema from first row using values()
+    let mut fields = Vec::new();
+    
+    for (i, cell) in first_values.iter().enumerate() {
+        let col_name = &column_names[i];
+        
+        let data_type = match cell {
+            CellValue::Float(_) | CellValue::Int32(_) | CellValue::Int64(_) => DataType::Float64,
+            CellValue::Str(_) | CellValue::NumericString(_) | CellValue::Bytes(_) => DataType::Utf8,
+            CellValue::DateTime(_) | CellValue::Date(_) => DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+            CellValue::Time(_) => DataType::Utf8,
+            CellValue::Missing(_) => DataType::Utf8,
+        };
+        
+        fields.push(Field::new(col_name.clone(), data_type, true));
+    }
+    
+    let schema = Arc::new(Schema::new(fields));
+    
+    // Build column arrays
+    let mut column_builders: Vec<Vec<Option<String>>> = vec![Vec::new(); column_count];
+    let mut numeric_builders: Vec<Vec<Option<f64>>> = vec![Vec::new(); column_count];
+    let mut timestamp_builders: Vec<Vec<Option<i64>>> = vec![Vec::new(); column_count];
+    
+    for row in &all_rows {
+        let values = row.values();
+        
+        for (i, cell) in values.iter().enumerate() {
+            match &schema.fields()[i].data_type() {
+                DataType::Float64 => {
+                    let value = match cell {
+                        CellValue::Float(f) => Some(*f),
+                        CellValue::Int32(val) => Some(*val as f64),
+                        CellValue::Int64(val) => Some(*val as f64),
+                        CellValue::Missing(_) => None,
+                        _ => None,
+                    };
+                    numeric_builders[i].push(value);
+                }
+                DataType::Timestamp(_, _) => {
+                    let value = match cell {
+                        CellValue::DateTime(dt) => Some(dt.unix_timestamp() * 1000),
+                        CellValue::Date(dt) => Some(dt.unix_timestamp() * 1000),
+                        CellValue::Missing(_) => None,
+                        _ => None,
+                    };
+                    timestamp_builders[i].push(value);
+                }
+                DataType::Utf8 => {
+                    let value = match cell {
+                        CellValue::Str(s) => Some(s.to_string()),
+                        CellValue::NumericString(s) => Some(s.to_string()),
+                        CellValue::Bytes(b) => Some(String::from_utf8_lossy(b).to_string()),
+                        CellValue::Time(d) => Some(format!("{}", d.whole_seconds())),
+                        CellValue::Missing(_) => None,
+                        _ => Some(format!("{:?}", cell)),
+                    };
+                    column_builders[i].push(value);
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    // Create Arrow arrays
+    let mut arrays: Vec<Arc<dyn Array>> = Vec::new();
+    for i in 0..column_count {
+        let array: Arc<dyn Array> = match &schema.fields()[i].data_type() {
+            DataType::Float64 => {
+                Arc::new(Float64Array::from(numeric_builders[i].clone()))
+            }
+            DataType::Timestamp(_, _) => {
+                Arc::new(TimestampMillisecondArray::from(timestamp_builders[i].clone()))
+            }
+            DataType::Utf8 => {
+                Arc::new(StringArray::from(column_builders[i].clone()))
+            }
+            _ => Arc::new(StringArray::from(column_builders[i].clone())),
+        };
+        arrays.push(array);
+    }
+    
+    let batch = RecordBatch::try_new(schema, arrays)?;
+    Ok(DataFrame { batches: vec![batch] })
+}
+

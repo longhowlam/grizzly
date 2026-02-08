@@ -9,6 +9,7 @@ Grizzly is a high-performance Python data manipulation library built from scratc
     -   Read/Write **Parquet** (native Arrow integration).
     -   Read/Write **JSON** (line-delimited formats).
     -   Read/Write **Excel** (powered by `calamine` and `rust_xlsxwriter`).
+    -   Read **SAS7BDAT** (SAS binary files).
 -   **Core Manipulation**:
     -   Fast filtering with `filter_eq`.
     -   Global sorting with `sort`.
@@ -25,6 +26,7 @@ Grizzly is a high-performance Python data manipulation library built from scratc
 - `read_parquet(path: str) -> DataFrame`: Reads a Parquet file into a DataFrame.
 - `read_json(path: str) -> DataFrame`: Reads a line-delimited JSON file into a DataFrame.
 - `read_excel(path: str) -> DataFrame`: Reads an Excel file (.xlsx) into a DataFrame.
+- `read_sas(path: str) -> DataFrame`: Reads a SAS7BDAT file into a DataFrame.
 
 ### DataFrame Methods
 
